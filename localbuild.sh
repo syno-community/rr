@@ -15,14 +15,16 @@ fi
 function help() {
   echo "Usage: $0 <command> [args]"
   echo "Commands:"
-  echo "  init [workspace] [rr.img] - Initialize the workspace"
-  echo "  config [model] - Configure the workspace"
-  echo "  pack [rr.img] - Pack the workspace"
+  echo "  create [workspace] [rr.img] - Create the workspace"
+  echo "  init - Initialize the environment"
+  echo "  config [model] [version] - Config the DSM system"
+  echo "  build - Build the DSM system"
+  echo "  pack [rr.img] - Pack to rr.img"
   echo "  help - Show this help"
   exit 1
 }
 
-function init() {
+function create() {
   WORKSPACE="$(realpath ${1:-"workspace"})"
   RRIMGPATH="$(realpath ${2:-"rr.img"})"
 
@@ -31,8 +33,8 @@ function init() {
     exit 1
   fi
 
-  sudo apt-get update
-  sudo apt-get install -y locales busybox dialog curl xz-utils cpio sed
+  sudo apt update
+  sudo apt install -y locales busybox dialog curl xz-utils cpio sed
   sudo locale-gen de_DE.UTF-8 en_US.UTF-8 es_ES.UTF-8 fr_FR.UTF-8 ja_JP.UTF-8 ko_KR.UTF-8 ru_RU.UTF-8 uk_UA.UTF-8 vi_VN.UTF-8 zh_CN.UTF-8 zh_HK.UTF-8 zh_TW.UTF-8
 
   YQ=$(command -v yq)
@@ -96,6 +98,21 @@ function init() {
   echo "OK."
 }
 
+function init() {
+  if [ ! -f $(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/rr.env ]; then
+    echo "Please run init first"
+    exit 1
+  fi
+  . $(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/rr.env
+  pushd "${CHROOT_PATH}/initrd/opt/rr"
+  echo "init"
+  ./init.sh
+  RET=$?
+  popd
+  [ ${RET} -ne 0 ] && echo "Failed." || echo "Success."
+  return ${RET}
+}
+
 function config() {
   if [ ! -f $(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/rr.env ]; then
     echo "Please run init first"
@@ -106,23 +123,37 @@ function config() {
   pushd "${CHROOT_PATH}/initrd/opt/rr"
   while true; do
     if [ -z "${1}" ]; then
-      echo "init"
-      ./init.sh || break
       echo "menu"
       ./menu.sh || break
+      RET=0
     else
-      echo "init"
-      ./init.sh || break
       echo "model"
       ./menu.sh modelMenu "${1:-"SA6400"}" || break
       echo "version"
       ./menu.sh productversMenu "${2:-"7.2"}" || break
-      echo "build"
-      ./menu.sh make -1 || break
-      echo "clean"
-      ./menu.sh cleanCache -1 || break
       RET=0
     fi
+    break
+  done
+  popd
+  [ ${RET} -ne 0 ] && echo "Failed." || echo "Success."
+  return ${RET}
+}
+
+function build() {
+  if [ ! -f $(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/rr.env ]; then
+    echo "Please run init first"
+    exit 1
+  fi
+  . $(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/rr.env
+  RET=1
+  pushd "${CHROOT_PATH}/initrd/opt/rr"
+  while true; do
+    echo "build"
+    ./menu.sh make -1 || break
+    echo "clean"
+    ./menu.sh cleanCache -1 || break
+    RET=0
     break
   done
   popd

@@ -329,6 +329,7 @@ function getLogo() {
   fi
   STATUS=$(curl -skL --connect-timeout 10 -w "%{http_code}" "https://${fastest}/api/products/getPhoto?product=${MODEL/+/%2B}&type=img_s&sort=0" -o "${PART3_PATH}/logo.png")
   if [ $? -ne 0 -o ${STATUS:-0} -ne 200 -o ! -f "${PART3_PATH}/logo.png" ]; then
+    rm -f "${PART3_PATH}/logo.png"
     return 1
   fi
   convert -rotate 180 "${PART3_PATH}/logo.png" "${PART3_PATH}/logo.png" 2>/dev/null
@@ -342,10 +343,10 @@ function getLogo() {
 # 1 - mode
 function rebootTo() {
   MODES="config recovery junior"
-  [ -z "${1}" ] && exit 1
-  if ! echo "${MODES}" | grep -qw "${1}"; then exit 1; fi
+  if [ -z "${1}" ] || ! echo "${MODES}" | grep -qw "${1}"; then exit 1; fi
   # echo "Rebooting to ${1} mode"
   GRUBPATH="$(dirname $(find ${PART1_PATH}/ -name grub.cfg 2>/dev/null | head -1))"
+  [ -z "${GRUBPATH}" ] && exit 1
   ENVFILE="${GRUBPATH}/grubenv"
   [ ! -f "${ENVFILE}" ] && grub-editenv ${ENVFILE} create
   grub-editenv ${ENVFILE} set next_entry="${1}"
@@ -368,5 +369,16 @@ function connectwlanif() {
     rm -f /var/run/wpa_supplicant.pid.${1}
   fi
   wpa_supplicant -i ${1} -c "${CONF}" -B -P "/var/run/wpa_supplicant.pid.${1}" >/dev/null 2>&1
+  return 0
+}
+
+###############################################################################
+# Find and mount the DSM root filesystem
+# (based on pocopico's TCRP code)
+function findDSMRoot() {
+  DSMROOTS=""
+  [ -z "${DSMROOTS}" ] && DSMROOTS="$(mdadm --detail --scan 2>/dev/null | grep -E "name=SynologyNAS:0|name=DiskStation:0|name=SynologyNVR:0|name=BeeStation:0" | awk '{print $2}' | uniq)"
+  [ -z "${DSMROOTS}" ] && DSMROOTS="$(lsblk -pno KNAME,PARTN,FSTYPE,FSVER,LABEL | grep -E "sd[a-z]{1,2}1" | grep -w "linux_raid_member" | grep "0.9" | awk '{print $1}')"
+  echo "${DSMROOTS}"
   return 0
 }

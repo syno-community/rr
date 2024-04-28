@@ -7,6 +7,7 @@ synoinfo: &synoinfo
   support_disk_compatibility: "no"
   support_memory_compatibility: "no"
   support_led_brightness_adjustment: "no"
+  support_bde_internal_10g: "no"
   internal_disk_without_led_mask: "no"
   support_syno_hybrid_raid:
   supportraidgroup:
@@ -44,15 +45,6 @@ dom: 1
 dt: true
 beta: false
 productvers:
-  "6.2":
-    kver: "4.4.59"
-    rd-compressed: false
-    cmdline:
-      <<: *cmdline
-    synoinfo:
-      <<: *synoinfo
-    patch: *patch
-
   "7.0":
     kver: "4.4.180"
     rd-compressed: false

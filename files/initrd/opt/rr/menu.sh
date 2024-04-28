@@ -19,6 +19,7 @@ fi
 
 # Get actual IP
 IP="$(getIP)"
+[[ "${IP}" =~ ^169\.254\..* ]] && IP=""
 
 # Debug flag
 # DEBUG=""
@@ -371,8 +372,6 @@ function productversMenu() {
 ###############################################################################
 # Parse Pat
 function ParsePat() {
-  rm -f "${LOG_FILE}"
-
   if [ -n "${MODEL}" -a -n "${PRODUCTVER}" ]; then
     MSG="$(printf "$(TEXT "You have selected the %s and %s.\n'Parse Pat' will overwrite the previous selection.\nDo you want to continue?")" "${MODEL}" "${PRODUCTVER}")"
     DIALOG --title "$(TEXT "Parse Pat")" \
@@ -402,11 +401,12 @@ function ParsePat() {
   fi
 
   while true; do
+    rm -f "${LOG_FILE}"
     echo "$(printf "$(TEXT "Parse %s ...")" "$(basename "${PAT_PATH}")")"
     extractPatFiles "${PAT_PATH}" "${UNTAR_PAT_PATH}"
     if [ $? -ne 0 ]; then
       rm -rf "${UNTAR_PAT_PATH}"
-      return 1
+      break
     fi
     if [ ! -f "${UNTAR_PAT_PATH}/GRUB_VER" -o ! -f "${UNTAR_PAT_PATH}/VERSION" ]; then
       echo -e "$(TEXT "pat Invalid, try again!")" >"${LOG_FILE}"
@@ -499,6 +499,9 @@ function ParsePat() {
     rm -f "${ORI_ZIMAGE_FILE}" "${ORI_RDGZ_FILE}" "${MOD_ZIMAGE_FILE}" "${MOD_RDGZ_FILE}" >/dev/null 2>&1 || true
     rm -f "${PART1_PATH}/grub_cksum.syno" "${PART1_PATH}/GRUB_VER" "${PART2_PATH}/"* >/dev/null 2>&1 || true
     touch ${PART1_PATH}/.build
+    rm -f "${LOG_FILE}"
+    echo "$(TEXT "Ready!")"
+    sleep 3
     break
   done 2>&1 | DIALOG --title "$(TEXT "Main menu")" \
     --progressbox "$(TEXT "Making ...")" 20 100
@@ -1099,6 +1102,7 @@ function getSynoExtractor() {
   if [ $? -ne 0 ]; then
     rm -f "${OLDPAT_PATH}"
     rm -rf "${RAMDISK_PATH}"
+    echo -e "$(TEXT "pat Invalid, try again!")" >"${LOG_FILE}"
     return 1
   fi
   rm -f "${OLDPAT_PATH}"
@@ -1148,6 +1152,7 @@ function extractPatFiles() {
   mkdir -p "${EXT_PATH}"
   echo -n "$(printf "$(TEXT "Disassembling %s: ")" "$(basename "${PAT_PATH}")")"
 
+  RET=0
   if [ "${isencrypted}" = "yes" ]; then
     EXTRACTOR_PATH="${PART3_PATH}/extractor"
     EXTRACTOR_BIN="syno_extract_system_patch"
@@ -1161,21 +1166,23 @@ function extractPatFiles() {
     # Uses the extractor to untar pat file
     echo "$(TEXT "Extracting ...")"
     LD_LIBRARY_PATH=${EXTRACTOR_PATH} "${EXTRACTOR_PATH}/${EXTRACTOR_BIN}" "${PAT_PATH}" "${EXT_PATH}" >"${LOG_FILE}" 2>&1
+    RET=$?
   else
     echo "$(TEXT "Extracting ...")"
     tar -xf "${PAT_PATH}" -C "${EXT_PATH}" >"${LOG_FILE}" 2>&1
-    if [ $? -ne 0 ]; then
-      return 1
-    fi
+    RET=$?
   fi
 
-  if [ ! -f ${EXT_PATH}/grub_cksum.syno ] ||
+  if [ ${RET} -ne 0 ] ||
+    [ ! -f ${EXT_PATH}/grub_cksum.syno ] ||
     [ ! -f ${EXT_PATH}/GRUB_VER ] ||
     [ ! -f ${EXT_PATH}/zImage ] ||
     [ ! -f ${EXT_PATH}/rd.gz ]; then
-    echo -e "$(TEXT "pat Invalid, try again!")" >"${LOG_FILE}"
+    echo -e "$(TEXT "pat Invalid, try again!")\nError: ${RET}" >"${LOG_FILE}"
     return 1
   fi
+  rm -f "${LOG_FILE}"
+  return 0
 }
 
 ###############################################################################
@@ -1296,9 +1303,10 @@ function make() {
     while true; do
       SIZE=256 # initrd-dsm + zImage-dsm ≈ 210M
       SPACELEFT=$(df -m ${PART3_PATH} 2>/dev/null | awk 'NR==2 {print $4}')
-      [ ${SPACELEFT:-0} -ge ${SIZE} ] && break
-      [ -f ${MOD_ZIMAGE_FILE} ] && rm -f "${MOD_ZIMAGE_FILE}" && continue
-      [ -f ${MOD_RDGZ_FILE} ] && rm -f "${MOD_RDGZ_FILE}" && continue
+      ZIMAGESIZE=$(du -m ${ORI_ZIMAGE_FILE} 2>/dev/null | awk '{print $1}')
+      RDGZSIZE=$(du -m ${ORI_RDGZ_FILE} 2>/dev/null | awk '{print $1}')
+      SPACEALL=$((${SPACELEFT:-0} + ${ZIMAGESIZE:-0} + ${RDGZSIZE:-0}))
+      [ ${SPACEALL:-0} -ge ${SIZE} ] && break
       echo -e "$(TEXT "No disk space left, please clean the cache and try again!")" >"${LOG_FILE}"
       return 1
     done
@@ -1525,6 +1533,7 @@ function setStaticIP() {
     done
     sleep 1
     IP="$(getIP)"
+    [[ "${IP}" =~ ^169\.254\..* ]] && IP=""
   ) 2>&1 | DIALOG --title "$(TEXT "Advanced")" \
     --progressbox "$(TEXT "Setting IP ...")" 20 100
   return
@@ -1684,7 +1693,7 @@ function formatDisks() {
     [ "${KNAME}" = "${LOADER_DISK}" -o "${PKNAME}" = "${LOADER_DISK}" ] && continue
     [ -z "${ID}" ] && ID="Unknown"
     echo "\"${KNAME}\" \"${ID}\" \"off\"" >>"${TMP_PATH}/opts"
-  done <<<$(lsblk -pno KNAME,ID,PKNAME)
+  done <<<$(lsblk -pno KNAME,ID,PKNAME | sort)
   if [ ! -f "${TMP_PATH}/opts" ]; then
     DIALOG --title "$(TEXT "Advanced")" \
       --msgbox "$(TEXT "No disk found!")" 0 0
@@ -1727,40 +1736,45 @@ function formatDisks() {
 function tryRecoveryDSM() {
   DIALOG --title "$(TEXT "Try recovery DSM")" \
     --infobox "$(TEXT "Trying to recovery a installed DSM system ...")" 0 0
-  DSMROOTDISK="$(blkid 2>/dev/null | grep -i linux_raid_member | grep -E "/dev/.*1: " | head -1 | awk -F ":" '{print $1}')"
-  if [ -z "${DSMROOTDISK}" ]; then
-    DIALOG --title "$(TEXT "Try recovery DSM")" \
-      --msgbox "$(TEXT "Unfortunately I couldn't mount the DSM partition!")" 0 0
+  DSMROOTS="$(findDSMRoot)"
+  if [ -z "${DSMROOTS}" ]; then
+    DIALOG --title "$(TEXT "Advanced")" \
+      --msgbox "$(TEXT "No DSM system partition(md0) found!\nPlease insert all disks before continuing.")" 0 0
     return
   fi
 
-  rm -rf "${TMP_PATH}/sdX1"
-  mkdir -p "${TMP_PATH}/sdX1"
-  mount "${DSMROOTDISK}" "${TMP_PATH}/sdX1"
+  mkdir -p "${TMP_PATH}/mdX"
+  mount -t ext4 "$(echo "${DSMROOTS}" | head -n 1 | cut -d' ' -f1)" "${TMP_PATH}/mdX"
+  if [ $? -ne 0 ]; then
+    DIALOG --title "$(TEXT "Advanced")" \
+      --msgbox "$(TEXT "mount DSM system partition(md0) failed!\nPlease insert all disks before continuing.")" 0 0
+    rm -rf "${TMP_PATH}/mdX"
+    return
+  fi
 
   function __umountDSMRootDisk() {
-    umount "${TMP_PATH}/sdX1"
-    rm -rf "${TMP_PATH}/sdX1"
+    umount "${TMP_PATH}/mdX"
+    rm -rf "${TMP_PATH}/mdX"
   }
 
   DIALOG --title "$(TEXT "Try recovery DSM")" \
     --infobox "$(TEXT "Checking for backup of user's configuration for bootloader ...")" 0 0
-  if [ -f "${TMP_PATH}/sdX1/usr/rr/backup/p1/user-config.yml" ]; then
-    R_MODEL="$(readConfigKey "model" "${TMP_PATH}/sdX1/usr/rr/backup/p1/user-config.yml")"
-    R_PRODUCTVER="$(readConfigKey "productver" "${TMP_PATH}/sdX1/usr/rr/backup/p1/user-config.yml")"
-    R_BUILDNUM="$(readConfigKey "buildnum" "${TMP_PATH}/sdX1/usr/rr/backup/p1/user-config.yml")"
-    R_SMALLNUM="$(readConfigKey "smallnum" "${TMP_PATH}/sdX1/usr/rr/backup/p1/user-config.yml")"
+  if [ -f "${TMP_PATH}/mdX/usr/rr/backup/p1/user-config.yml" ]; then
+    R_MODEL="$(readConfigKey "model" "${TMP_PATH}/mdX/usr/rr/backup/p1/user-config.yml")"
+    R_PRODUCTVER="$(readConfigKey "productver" "${TMP_PATH}/mdX/usr/rr/backup/p1/user-config.yml")"
+    R_BUILDNUM="$(readConfigKey "buildnum" "${TMP_PATH}/mdX/usr/rr/backup/p1/user-config.yml")"
+    R_SMALLNUM="$(readConfigKey "smallnum" "${TMP_PATH}/mdX/usr/rr/backup/p1/user-config.yml")"
     R_PATURL="$(readConfigKey "paturl" "${USER_CONFIG_FILE}")"
     R_PATSUM="$(readConfigKey "patsum" "${USER_CONFIG_FILE}")"
     if [ -n "${R_MODEL}" ] && [ -f "${WORK_PATH}/model-configs/${R_MODEL}.yml" ] &&
       [ -n "${R_PRODUCTVER}" ] && arrayExistItem "${R_PRODUCTVER}" "$(readConfigEntriesArray "productvers" "${WORK_PATH}/model-configs/${R_MODEL}.yml" | sort -r)" &&
       [ -n "${R_BUILDNUM}" ] && [ -n "${R_SMALLNUM}" ]; then
       if [ "${R_PATURL:0:1}" = "#" ] || [ -z "${R_PATSUM}" ]; then
-        if [ -f "${TMP_PATH}/sdX1/.syno/patch/VERSION" ] &&
-          [ -f "${TMP_PATH}/sdX1/.syno/patch/zImage" ] &&
-          [ -f "${TMP_PATH}/sdX1/.syno/patch/rd.gz" ]; then
-          cp -f "${TMP_PATH}/sdX1/.syno/patch/zImage" "${ORI_ZIMAGE_FILE}"
-          cp -f "${TMP_PATH}/sdX1/.syno/patch/rd.gz" "${ORI_RDGZ_FILE}"
+        if [ -f "${TMP_PATH}/mdX/.syno/patch/VERSION" ] &&
+          [ -f "${TMP_PATH}/mdX/.syno/patch/zImage" ] &&
+          [ -f "${TMP_PATH}/mdX/.syno/patch/rd.gz" ]; then
+          cp -f "${TMP_PATH}/mdX/.syno/patch/zImage" "${ORI_ZIMAGE_FILE}"
+          cp -f "${TMP_PATH}/mdX/.syno/patch/rd.gz" "${ORI_RDGZ_FILE}"
         else
           __umountDSMRootDisk
           DIALOG --title "$(TEXT "Try recovery DSM")" \
@@ -1768,15 +1782,15 @@ function tryRecoveryDSM() {
           return
         fi
       else
-        cp -rf "${TMP_PATH}/sdX1/usr/rr/backup/p1/*" "${PART1_PATH}"
-        if [ -d "${TMP_PATH}/sdX1/usr/rr/backup/p3" ]; then
-          cp -rf "${TMP_PATH}/sdX1/usr/rr/backup/p3/*" "${PART3_PATH}"
+        cp -rf "${TMP_PATH}/mdX/usr/rr/backup/p1/*" "${PART1_PATH}"
+        if [ -d "${TMP_PATH}/mdX/usr/rr/backup/p3" ]; then
+          cp -rf "${TMP_PATH}/mdX/usr/rr/backup/p3/*" "${PART3_PATH}"
         fi
-        if [ -f "${TMP_PATH}/sdX1/.syno/patch/VERSION" ] &&
-          [ -f "${TMP_PATH}/sdX1/.syno/patch/zImage" ] &&
-          [ -f "${TMP_PATH}/sdX1/.syno/patch/rd.gz" ]; then
-          cp -f "${TMP_PATH}/sdX1/.syno/patch/zImage" "${ORI_ZIMAGE_FILE}"
-          cp -f "${TMP_PATH}/sdX1/.syno/patch/rd.gz" "${ORI_RDGZ_FILE}"
+        if [ -f "${TMP_PATH}/mdX/.syno/patch/VERSION" ] &&
+          [ -f "${TMP_PATH}/mdX/.syno/patch/zImage" ] &&
+          [ -f "${TMP_PATH}/mdX/.syno/patch/rd.gz" ]; then
+          cp -f "${TMP_PATH}/mdX/.syno/patch/zImage" "${ORI_ZIMAGE_FILE}"
+          cp -f "${TMP_PATH}/mdX/.syno/patch/rd.gz" "${ORI_RDGZ_FILE}"
         fi
         __umountDSMRootDisk
         DIALOG --title "$(TEXT "Try recovery DSM")" \
@@ -1790,9 +1804,9 @@ function tryRecoveryDSM() {
 
   DIALOG --title "$(TEXT "Try recovery DSM")" \
     --infobox "$(TEXT "Checking for installed DSM system ...")" 0 0
-  if [ -f "${TMP_PATH}/sdX1/.syno/patch/VERSION" ] &&
-    [ -f "${TMP_PATH}/sdX1/.syno/patch/zImage" ] &&
-    [ -f "${TMP_PATH}/sdX1/.syno/patch/rd.gz" ]; then
+  if [ -f "${TMP_PATH}/mdX/.syno/patch/VERSION" ] &&
+    [ -f "${TMP_PATH}/mdX/.syno/patch/zImage" ] &&
+    [ -f "${TMP_PATH}/mdX/.syno/patch/rd.gz" ]; then
     R_MODEL=""
     R_PRODUCTVER=""
     R_BUILDNUM=""
@@ -1800,11 +1814,11 @@ function tryRecoveryDSM() {
     R_SN=""
     R_MAC1=""
     R_MAC2=""
-    unique="$(_get_conf_kv unique "${TMP_PATH}/sdX1/.syno/patch/VERSION")"
-    majorversion="$(_get_conf_kv majorversion "${TMP_PATH}/sdX1/.syno/patch/VERSION")"
-    minorversion="$(_get_conf_kv minorversion "${TMP_PATH}/sdX1/.syno/patch/VERSION")"
-    buildnumber="$(_get_conf_kv buildnumber "${TMP_PATH}/sdX1/.syno/patch/VERSION")"
-    smallfixnumber="$(_get_conf_kv smallfixnumber "${TMP_PATH}/sdX1/.syno/patch/VERSION")"
+    unique="$(_get_conf_kv unique "${TMP_PATH}/mdX/.syno/patch/VERSION")"
+    majorversion="$(_get_conf_kv majorversion "${TMP_PATH}/mdX/.syno/patch/VERSION")"
+    minorversion="$(_get_conf_kv minorversion "${TMP_PATH}/mdX/.syno/patch/VERSION")"
+    buildnumber="$(_get_conf_kv buildnumber "${TMP_PATH}/mdX/.syno/patch/VERSION")"
+    smallfixnumber="$(_get_conf_kv smallfixnumber "${TMP_PATH}/mdX/.syno/patch/VERSION")"
     while read F; do
       M="$(basename ${F} .yml)"
       UNIQUE=$(readModelKey "${M}" "unique")
@@ -1818,13 +1832,13 @@ function tryRecoveryDSM() {
     fi
     R_BUILDNUM=${buildnumber}
     R_SMALLNUM=${smallfixnumber}
-    if [ -f "${TMP_PATH}/sdX1/etc/synoinfo.conf" ]; then
-      R_SN=$(_get_conf_kv SN "${TMP_PATH}/sdX1/etc/synoinfo.conf")
+    if [ -f "${TMP_PATH}/mdX/etc/synoinfo.conf" ]; then
+      R_SN=$(_get_conf_kv SN "${TMP_PATH}/mdX/etc/synoinfo.conf")
     fi
 
     if [ -n "${R_MODEL}" ] && [ -n "${R_PRODUCTVER}" ] && [ -n "${R_BUILDNUM}" ] && [ -n "${R_SMALLNUM}" ]; then
-      cp -f "${TMP_PATH}/sdX1/.syno/patch/zImage" "${ORI_ZIMAGE_FILE}"
-      cp -f "${TMP_PATH}/sdX1/.syno/patch/rd.gz" "${ORI_RDGZ_FILE}"
+      cp -f "${TMP_PATH}/mdX/.syno/patch/zImage" "${ORI_ZIMAGE_FILE}"
+      cp -f "${TMP_PATH}/mdX/.syno/patch/rd.gz" "${ORI_RDGZ_FILE}"
 
       MODEL="${R_MODEL}"
       PRODUCTVER="${R_PRODUCTVER}"
@@ -1893,59 +1907,64 @@ function tryRecoveryDSM() {
 ###############################################################################
 # Allow downgrade installation
 function allowDSMDowngrade() {
-  DIALOG --title "$(TEXT "Advanced")" \
-    --yesno "$(TEXT "Please insert all disks before continuing.\n")" 0 0
-  [ $? -ne 0 ] && return
   MSG=""
   MSG+="$(TEXT "This feature will allow you to downgrade the installation by removing the VERSION file from the first partition of all disks.\n")"
   MSG+="$(TEXT "Warning:\nThis operation is irreversible. Please backup important data. Do you want to continue?")"
   DIALOG --title "$(TEXT "Advanced")" \
     --yesno "${MSG}" 0 0
   [ $? -ne 0 ] && return
+  DSMROOTS="$(findDSMRoot)"
+  if [ -z "${DSMROOTS}" ]; then
+    DIALOG --title "$(TEXT "Advanced")" \
+      --msgbox "$(TEXT "No DSM system partition(md0) found!\nPlease insert all disks before continuing.")" 0 0
+    return
+  fi
   (
-    mkdir -p "${TMP_PATH}/sdX1"
-    # for I in $(ls /dev/sd*1 2>/dev/null | grep -v "${LOADER_DISK_PART1}"); do
-    for I in $(blkid 2>/dev/null | grep -i linux_raid_member | grep -E "/dev/.*1: " | awk -F ":" '{print $1}'); do
-      mount "${I}" "${TMP_PATH}/sdX1"
-      [ -f "${TMP_PATH}/sdX1/etc/VERSION" ] && rm -f "${TMP_PATH}/sdX1/etc/VERSION"
-      [ -f "${TMP_PATH}/sdX1/etc.defaults/VERSION" ] && rm -f "${TMP_PATH}/sdX1/etc.defaults/VERSION"
+    mkdir -p "${TMP_PATH}/mdX"
+    for I in ${DSMROOTS}; do
+      mount -t ext4 "${I}" "${TMP_PATH}/mdX"
+      [ $? -ne 0 ] && continue
+      [ -f "${TMP_PATH}/mdX/etc/VERSION" ] && rm -f "${TMP_PATH}/mdX/etc/VERSION"
+      [ -f "${TMP_PATH}/mdX/etc.defaults/VERSION" ] && rm -f "${TMP_PATH}/mdX/etc.defaults/VERSION"
       sync
-      umount "${I}"
+      umount "${TMP_PATH}/mdX"
     done
-    rm -rf "${TMP_PATH}/sdX1"
+    rm -rf "${TMP_PATH}/mdX"
   ) 2>&1 | DIALOG --title "$(TEXT "Advanced")" \
     --progressbox "$(TEXT "Removing ...")" 20 100
-  MSG="$(TEXT "Remove VERSION file for all disks completed.")"
   DIALOG --title "$(TEXT "Advanced")" \
-    --msgbox "${MSG}" 0 0
+    --msgbox "$(TEXT "Remove VERSION file for DSM system partition(md0) completed.")" 0 0
   return
 }
 
 ###############################################################################
 # Reset DSM system password
 function resetDSMPassword() {
-  DIALOG --title "$(TEXT "Advanced")" \
-    --yesno "$(TEXT "Please insert all disks before continuing.\n")" 0 0
-  [ $? -ne 0 ] && return
+  DSMROOTS="$(findDSMRoot)"
+  if [ -z "${DSMROOTS}" ]; then
+    DIALOG --title "$(TEXT "Advanced")" \
+      --msgbox "$(TEXT "No DSM system partition(md0) found!\nPlease insert all disks before continuing.")" 0 0
+    return
+  fi
   rm -f "${TMP_PATH}/menu"
-  mkdir -p "${TMP_PATH}/sdX1"
-  # for I in $(ls /dev/sd*1 2>/dev/null | grep -v "${LOADER_DISK_PART1}"); do
-  for I in $(blkid 2>/dev/null | grep -i linux_raid_member | grep -E "/dev/.*1: " | awk -F ":" '{print $1}'); do
-    mount ${I} "${TMP_PATH}/sdX1"
-    if [ -f "${TMP_PATH}/sdX1/etc/shadow" ]; then
+  mkdir -p "${TMP_PATH}/mdX"
+  for I in ${DSMROOTS}; do
+    mount -t ext4 "${I}" "${TMP_PATH}/mdX"
+    [ $? -ne 0 ] && continue
+    if [ -f "${TMP_PATH}/mdX/etc/shadow" ]; then
       while read L; do
         U=$(echo "${L}" | awk -F ':' '{if ($2 != "*" && $2 != "!!") print $1;}')
         [ -z "${U}" ] && continue
         E=$(echo "${L}" | awk -F ':' '{if ($8 == "1") print "disabled"; else print "        ";}')
-        grep -q "status=on" "${TMP_PATH}/sdX1/usr/syno/etc/packages/SecureSignIn/preference/${U}/method.config" 2>/dev/null
+        grep -q "status=on" "${TMP_PATH}/mdX/usr/syno/etc/packages/SecureSignIn/preference/${U}/method.config" 2>/dev/null
         [ $? -eq 0 ] && S="SecureSignIn" || S="            "
         printf "\"%-36s %-10s %-14s\"\n" "${U}" "${E}" "${S}" >>"${TMP_PATH}/menu"
-      done <<<$(cat "${TMP_PATH}/sdX1/etc/shadow" 2>/dev/null)
+      done <<<$(cat "${TMP_PATH}/mdX/etc/shadow" 2>/dev/null)
     fi
-    umount "${I}"
+    umount "${TMP_PATH}/mdX"
     [ -f "${TMP_PATH}/menu" ] && break
   done
-  rm -rf "${TMP_PATH}/sdX1"
+  rm -rf "${TMP_PATH}/mdX"
   if [ ! -f "${TMP_PATH}/menu" ]; then
     DIALOG --title "$(TEXT "Advanced")" \
       --msgbox "$(TEXT "All existing users have been disabled. Please try adding new user.")" 0 0
@@ -1969,20 +1988,20 @@ function resetDSMPassword() {
   done
   NEWPASSWD="$(python -c "from passlib.hash import sha512_crypt;pw=\"${VALUE}\";print(sha512_crypt.using(rounds=5000).hash(pw))")"
   (
-    mkdir -p "${TMP_PATH}/sdX1"
-    # for I in $(ls /dev/sd*1 2>/dev/null | grep -v "${LOADER_DISK_PART1}"); do
-    for I in $(blkid 2>/dev/null | grep -i linux_raid_member | grep -E "/dev/.*1: " | awk -F ":" '{print $1}'); do
-      mount "${I}" "${TMP_PATH}/sdX1"
-      OLDPASSWD="$(cat "${TMP_PATH}/sdX1/etc/shadow" 2>/dev/null | grep "^${USER}:" | awk -F ':' '{print $2}')"
+    mkdir -p "${TMP_PATH}/mdX"
+    for I in ${DSMROOTS}; do
+      mount -t ext4 "${I}" "${TMP_PATH}/mdX"
+      [ $? -ne 0 ] && continue
+      OLDPASSWD="$(cat "${TMP_PATH}/mdX/etc/shadow" 2>/dev/null | grep "^${USER}:" | awk -F ':' '{print $2}')"
       if [ -n "${NEWPASSWD}" -a -n "${OLDPASSWD}" ]; then
-        sed -i "s|${OLDPASSWD}|${NEWPASSWD}|g" "${TMP_PATH}/sdX1/etc/shadow"
-        sed -i "/^${USER}:/ s/\([^:]*\):\([^:]*\):\([^:]*\):\([^:]*\):\([^:]*\):\([^:]*\):\([^:]*\):\([^:]*\):\([^:]*\)/\1:\2:\3:\4:\5:\6:\7::\9/" "${TMP_PATH}/sdX1/etc/shadow"
+        sed -i "s|${OLDPASSWD}|${NEWPASSWD}|g" "${TMP_PATH}/mdX/etc/shadow"
+        sed -i "/^${USER}:/ s/\([^:]*\):\([^:]*\):\([^:]*\):\([^:]*\):\([^:]*\):\([^:]*\):\([^:]*\):\([^:]*\):\([^:]*\)/\1:\2:\3:\4:\5:\6:\7::\9/" "${TMP_PATH}/mdX/etc/shadow"
       fi
-      sed -i "s|status=on|status=off|g" "${TMP_PATH}/sdX1/usr/syno/etc/packages/SecureSignIn/preference/${USER}/method.config" 2>/dev/null
+      sed -i "s|status=on|status=off|g" "${TMP_PATH}/mdX/usr/syno/etc/packages/SecureSignIn/preference/${USER}/method.config" 2>/dev/null
       sync
-      umount "${I}"
+      umount "${TMP_PATH}/mdX"
     done
-    rm -rf "${TMP_PATH}/sdX1"
+    rm -rf "${TMP_PATH}/mdX"
   ) 2>&1 | DIALOG --title "$(TEXT "Advanced")" \
     --progressbox "$(TEXT "Resetting ...")" 20 100
   DIALOG --title "$(TEXT "Advanced")" \
@@ -1993,9 +2012,12 @@ function resetDSMPassword() {
 ###############################################################################
 # Reset DSM system password
 function addNewDSMUser() {
-  DIALOG --title "$(TEXT "Advanced")" \
-    --yesno "$(TEXT "Please insert all disks before continuing.\n")" 0 0
-  [ $? -ne 0 ] && return
+  DSMROOTS="$(findDSMRoot)"
+  if [ -z "${DSMROOTS}" ]; then
+    DIALOG --title "$(TEXT "Advanced")" \
+      --msgbox "$(TEXT "No DSM system partition(md0) found!\nPlease insert all disks before continuing.")" 0 0
+    return
+  fi
   MSG="$(TEXT "Add to administrators group by default")"
   DIALOG --title "$(TEXT "Advanced")" \
     --form "${MSG}" 8 60 3 "username:" 1 1 "${sn}" 1 10 50 0 "password:" 2 1 "${mac1}" 2 10 50 0 \
@@ -2008,12 +2030,13 @@ function addNewDSMUser() {
     ONBOOTUP="${ONBOOTUP}if synouser --enum local | grep -q ^${username}\$; then synouser --setpw ${username} ${password}; else synouser --add ${username} ${password} rr 0 user@rr.com 1; fi\n"
     ONBOOTUP="${ONBOOTUP}synogroup --member administrators ${username}\n"
     ONBOOTUP="${ONBOOTUP}echo \"DELETE FROM task WHERE task_name LIKE ''RRONBOOTUPRR_ADDUSER'';\" | sqlite3 /usr/syno/etc/esynoscheduler/esynoscheduler.db\n"
-    mkdir -p "${TMP_PATH}/sdX1"
-    # for I in $(ls /dev/sd*1 2>/dev/null | grep -v "${LOADER_DISK_PART1}"); do
-    for I in $(blkid 2>/dev/null | grep -i linux_raid_member | grep -E "/dev/.*1: " | awk -F ":" '{print $1}'); do
-      mount "${I}" "${TMP_PATH}/sdX1"
-      if [ -f "${TMP_PATH}/sdX1/usr/syno/etc/esynoscheduler/esynoscheduler.db" ]; then
-        sqlite3 ${TMP_PATH}/sdX1/usr/syno/etc/esynoscheduler/esynoscheduler.db <<EOF
+
+    mkdir -p "${TMP_PATH}/mdX"
+    for I in ${DSMROOTS}; do
+      mount -t ext4 "${I}" "${TMP_PATH}/mdX"
+      [ $? -ne 0 ] && continue
+      if [ -f "${TMP_PATH}/mdX/usr/syno/etc/esynoscheduler/esynoscheduler.db" ]; then
+        sqlite3 ${TMP_PATH}/mdX/usr/syno/etc/esynoscheduler/esynoscheduler.db <<EOF
 DELETE FROM task WHERE task_name LIKE 'RRONBOOTUPRR_ADDUSER';
 INSERT INTO task VALUES('RRONBOOTUPRR_ADDUSER', '', 'bootup', '', 1, 0, 0, 0, '', 0, '$(echo -e ${ONBOOTUP})', 'script', '{}', '', '', '{}', '{}');
 EOF
@@ -2021,9 +2044,9 @@ EOF
         sync
         echo "true" >${TMP_PATH}/isEnable
       fi
-      umount "${I}"
+      umount "${TMP_PATH}/mdX"
     done
-    rm -rf "${TMP_PATH}/sdX1"
+    rm -rf "${TMP_PATH}/mdX"
   ) 2>&1 | DIALOG --title "$(TEXT "Advanced")" \
     --progressbox "$(TEXT "Adding ...")" 20 100
   [ "$(cat ${TMP_PATH}/isEnable 2>/dev/null)" = "true" ] && MSG="$(TEXT "User added successfully.")" || MSG="$(TEXT "User add failed.")"
@@ -2035,19 +2058,22 @@ EOF
 ###############################################################################
 # Force enable Telnet&SSH of DSM system
 function forceEnableDSMTelnetSSH() {
-  DIALOG --title "$(TEXT "Advanced")" \
-    --yesno "$(TEXT "Please insert all disks before continuing.\n")" 0 0
-  [ $? -ne 0 ] && return
+  DSMROOTS="$(findDSMRoot)"
+  if [ -z "${DSMROOTS}" ]; then
+    DIALOG --title "$(TEXT "Advanced")" \
+      --msgbox "$(TEXT "No DSM system partition(md0) found!\nPlease insert all disks before continuing.")" 0 0
+    return
+  fi
   (
     ONBOOTUP=""
     ONBOOTUP="${ONBOOTUP}synowebapi --exec api=SYNO.Core.Terminal method=set version=3 enable_telnet=true enable_ssh=true ssh_port=22 forbid_console=false\n"
     ONBOOTUP="${ONBOOTUP}echo \"DELETE FROM task WHERE task_name LIKE ''RRONBOOTUPRR_SSH'';\" | sqlite3 /usr/syno/etc/esynoscheduler/esynoscheduler.db\n"
-    mkdir -p "${TMP_PATH}/sdX1"
-    # for I in $(ls /dev/sd*1 2>/dev/null | grep -v "${LOADER_DISK_PART1}"); do
-    for I in $(blkid 2>/dev/null | grep -i linux_raid_member | grep -E "/dev/.*1: " | awk -F ":" '{print $1}'); do
-      mount "${I}" "${TMP_PATH}/sdX1"
-      if [ -f "${TMP_PATH}/sdX1/usr/syno/etc/esynoscheduler/esynoscheduler.db" ]; then
-        sqlite3 ${TMP_PATH}/sdX1/usr/syno/etc/esynoscheduler/esynoscheduler.db <<EOF
+    mkdir -p "${TMP_PATH}/mdX"
+    for I in ${DSMROOTS}; do
+      mount -t ext4 "${I}" "${TMP_PATH}/mdX"
+      [ $? -ne 0 ] && continue
+      if [ -f "${TMP_PATH}/mdX/usr/syno/etc/esynoscheduler/esynoscheduler.db" ]; then
+        sqlite3 ${TMP_PATH}/mdX/usr/syno/etc/esynoscheduler/esynoscheduler.db <<EOF
 DELETE FROM task WHERE task_name LIKE 'RRONBOOTUPRR_SSH';
 INSERT INTO task VALUES('RRONBOOTUPRR_SSH', '', 'bootup', '', 1, 0, 0, 0, '', 0, '$(echo -e ${ONBOOTUP})', 'script', '{}', '', '', '{}', '{}');
 EOF
@@ -2055,9 +2081,9 @@ EOF
         sync
         echo "true" >${TMP_PATH}/isEnable
       fi
-      umount "${I}"
+      umount "${TMP_PATH}/mdX"
     done
-    rm -rf "${TMP_PATH}/sdX1"
+    rm -rf "${TMP_PATH}/mdX"
   ) 2>&1 | DIALOG --title "$(TEXT "Advanced")" \
     --progressbox "$(TEXT "Enabling ...")" 20 100
   [ "$(cat ${TMP_PATH}/isEnable 2>/dev/null)" = "true" ] && MSG="$(TEXT "Enabled Telnet&SSH successfully.")" || MSG="$(TEXT "Enabled Telnet&SSH failed.")"
@@ -2069,25 +2095,28 @@ EOF
 ###############################################################################
 # Removing the blocked ip database
 function removeBlockIPDB {
-  DIALOG --title "$(TEXT "Advanced")" \
-    --yesno "$(TEXT "Please insert all disks before continuing.\n")" 0 0
-  [ $? -ne 0 ] && return
   MSG=""
   MSG+="$(TEXT "This feature will removing the blocked ip database from the first partition of all disks.\n")"
   MSG+="$(TEXT "Warning:\nThis operation is irreversible. Please backup important data. Do you want to continue?")"
   DIALOG --title "$(TEXT "Advanced")" \
     --yesno "${MSG}" 0 0
   [ $? -ne 0 ] && return
+  DSMROOTS="$(findDSMRoot)"
+  if [ -z "${DSMROOTS}" ]; then
+    DIALOG --title "$(TEXT "Advanced")" \
+      --msgbox "$(TEXT "No DSM system partition(md0) found!\nPlease insert all disks before continuing.")" 0 0
+    return
+  fi
   (
-    mkdir -p "${TMP_PATH}/sdX1"
-    # for I in $(ls /dev/sd*1 2>/dev/null | grep -v "${LOADER_DISK_PART1}"); do
-    for I in $(blkid 2>/dev/null | grep -i linux_raid_member | grep -E "/dev/.*1: " | awk -F ":" '{print $1}'); do
-      mount "${I}" "${TMP_PATH}/sdX1"
-      [ -f "${TMP_PATH}/sdX1/etc/synoautoblock.db" ] && rm -f "${TMP_PATH}/sdX1/etc/synoautoblock.db"
+    mkdir -p "${TMP_PATH}/mdX"
+    for I in ${DSMROOTS}; do
+      mount -t ext4 "${I}" "${TMP_PATH}/mdX"
+      [ $? -ne 0 ] && continue
+      [ -f "${TMP_PATH}/mdX/etc/synoautoblock.db" ] && rm -f "${TMP_PATH}/mdX/etc/synoautoblock.db"
       sync
-      umount "${I}"
+      umount "${TMP_PATH}/mdX"
     done
-    rm -rf "${TMP_PATH}/sdX1"
+    rm -rf "${TMP_PATH}/mdX"
   ) 2>&1 | DIALOG --title "$(TEXT "Advanced")" \
     --progressbox "$(TEXT "Removing ...")" 20 100
   MSG="$(TEXT "The blocked ip database has been deleted.")"
@@ -2104,7 +2133,7 @@ function cloneBootloaderDisk() {
     [ -z "${KNAME}" -o -z "${ID}" ] && continue
     [ "${KNAME}" = "${LOADER_DISK}" -o "${PKNAME}" = "${LOADER_DISK}" ] && continue
     echo "\"${KNAME}\" \"${ID}\" \"off\"" >>"${TMP_PATH}/opts"
-  done <<<$(lsblk -dpno KNAME,ID,PKNAME)
+  done <<<$(lsblk -dpno KNAME,ID,PKNAME | sort)
   if [ ! -f "${TMP_PATH}/opts" ]; then
     DIALOG --title "$(TEXT "Advanced")" \
       --msgbox "$(TEXT "No disk found!")" 0 0
@@ -2133,37 +2162,93 @@ function cloneBootloaderDisk() {
     [ $? -ne 0 ] && return
   fi
   (
+    rm -f "${LOG_FILE}"
     rm -rf "${PART3_PATH}/dl"
     CLEARCACHE=0
 
     gzip -dc "${WORK_PATH}/grub.img.gz" | dd of="${RESP}" bs=1M conv=fsync status=progress
     hdparm -z "${RESP}" # reset disk cache
     fdisk -l "${RESP}"
-    sleep 3
+    sleep 1
 
+    NEW_BLDISK_P1="$(lsblk "${RESP}" -pno KNAME,LABEL 2>/dev/null | grep 'RR1' | awk '{print $1}')"
+    NEW_BLDISK_P2="$(lsblk "${RESP}" -pno KNAME,LABEL 2>/dev/null | grep 'RR2' | awk '{print $1}')"
+    NEW_BLDISK_P3="$(lsblk "${RESP}" -pno KNAME,LABEL 2>/dev/null | grep 'RR3' | awk '{print $1}')"
+    SIZEOFDISK=$(cat /sys/block/${RESP/\/dev\//}/size)
+    ENDSECTOR=$(($(fdisk -l ${RESP} | grep "${NEW_BLDISK_P3}" | awk '{print $3}') + 1))
+    if [ ${SIZEOFDISK}0 -ne ${ENDSECTOR}0 ]; then
+      echo -e "\033[1;36mResizing ${NEW_BLDISK_P3}\033[0m"
+      echo -e "d\n\nn\n\n\n\n\nn\nw" | fdisk "${RESP}" >/dev/null 2>&1
+      resize2fs "${NEW_BLDISK_P3}"
+      fdisk -l "${RESP}"
+      sleep 1
+    fi
+    function __umountNewBlDisk() {
+      umount "${TMP_PATH}/sdX1" 2>/dev/null
+      umount "${TMP_PATH}/sdX2" 2>/dev/null
+      umount "${TMP_PATH}/sdX3" 2>/dev/null
+    }
     mkdir -p "${TMP_PATH}/sdX1"
-    mount "$(lsblk "${RESP}" -pno KNAME,LABEL 2>/dev/null | grep RR1 | awk '{print $1}')" "${TMP_PATH}/sdX1"
-    cp -vRf "${PART1_PATH}/". "${TMP_PATH}/sdX1/"
-    sync
-    umount "${TMP_PATH}/sdX1"
-
     mkdir -p "${TMP_PATH}/sdX2"
-    mount "$(lsblk "${RESP}" -pno KNAME,LABEL 2>/dev/null | grep RR2 | awk '{print $1}')" "${TMP_PATH}/sdX2"
-    cp -vRf "${PART2_PATH}/". "${TMP_PATH}/sdX2/"
-    sync
-    umount "${TMP_PATH}/sdX2"
-
     mkdir -p "${TMP_PATH}/sdX3"
-    mount "$(lsblk "${RESP}" -pno KNAME,LABEL 2>/dev/null | grep RR3 | awk '{print $1}')" "${TMP_PATH}/sdX3"
-    cp -vRf "${PART3_PATH}/". "${TMP_PATH}/sdX3/"
+    mount "${NEW_BLDISK_P1}" "${TMP_PATH}/sdX1" || (
+      echo "$(printf "$(TEXT "Can't mount %s.")" "${NEW_BLDISK_P1}")" >"${LOG_FILE}"
+      __umountNewBlDisk
+      break
+    )
+    mount "${NEW_BLDISK_P2}" "${TMP_PATH}/sdX2" || (
+      echo "$(printf "$(TEXT "Can't mount %s.")" "${NEW_BLDISK_P2}")" >"${LOG_FILE}"
+      __umountNewBlDisk
+      break
+    )
+    mount "${NEW_BLDISK_P3}" "${TMP_PATH}/sdX3" || (
+      echo "$(printf "$(TEXT "Can't mount %s.")" "${NEW_BLDISK_P3}")" >"${LOG_FILE}"
+      __umountNewBlDisk
+      break
+    )
+
+    SIZEOLD1="$(du -sm "${PART1_PATH}" 2>/dev/null | awk '{print $1}')"
+    SIZEOLD2="$(du -sm "${PART2_PATH}" 2>/dev/null | awk '{print $1}')"
+    SIZEOLD3="$(du -sm "${PART3_PATH}" 2>/dev/null | awk '{print $1}')"
+    SIZENEW1="$(df -m "${NEW_BLDISK_P1}" 2>/dev/null | awk 'NR==2 {print $4}')"
+    SIZENEW2="$(df -m "${NEW_BLDISK_P2}" 2>/dev/null | awk 'NR==2 {print $4}')"
+    SIZENEW3="$(df -m "${NEW_BLDISK_P3}" 2>/dev/null | awk 'NR==2 {print $4}')"
+
+    if [ ${SIZEOLD1:-0} -ge ${SIZENEW1:-0} ] || [ ${SIZEOLD2:-0} -ge ${SIZENEW2:-0} ] || [ ${SIZEOLD3:-0} -ge ${SIZENEW3:-0} ]; then
+      MSG="$(TEXT "Cloning failed due to insufficient remaining disk space on the selected hard drive.")"
+      echo "${MSG}" >"${LOG_FILE}"
+      __umountNewBlDisk
+      break
+    fi
+
+    cp -vRf "${PART1_PATH}/". "${TMP_PATH}/sdX1/" || (
+      echo "$(printf "$(TEXT "Can't copy to %s.")" "${NEW_BLDISK_P1}")" >"${LOG_FILE}"
+      __umountNewBlDisk
+      break
+    )
+    cp -vRf "${PART2_PATH}/". "${TMP_PATH}/sdX2/" || (
+      echo "$(printf "$(TEXT "Can't copy to %s.")" "${NEW_BLDISK_P2}")" >"${LOG_FILE}"
+      __umountNewBlDisk
+      break
+    )
+    cp -vRf "${PART3_PATH}/". "${TMP_PATH}/sdX3/" || (
+      echo "$(printf "$(TEXT "Can't copy to %s.")" "${NEW_BLDISK_P3}")" >"${LOG_FILE}"
+      __umountNewBlDisk
+      break
+    )
     sync
-    umount "${TMP_PATH}/sdX3"
+    __umountNewBlDisk
     sleep 3
   ) 2>&1 | DIALOG --title "$(TEXT "Advanced")" \
     --progressbox "$(TEXT "Cloning ...")" 20 100
-  DIALOG --title "${T}" \
-    --msgbox "$(printf "$(TEXT "Bootloader has been cloned to disk %s, please remove the current bootloader disk!\nReboot?")" "${RESP}")" 0 0
-  rebootTo config
+  if [ -f "${LOG_FILE}" ]; then
+    DIALOG --title "$(TEXT "Advanced")" \
+      --msgbox "$(cat ${LOG_FILE})" 0 0
+  else
+    DIALOG --title "$(TEXT "Advanced")" \
+      --msgbox "$(printf "$(TEXT "Bootloader has been cloned to disk %s, please remove the current bootloader disk!\nReboot?")" "${RESP}")" 0 0
+    rebootTo config
+  fi
   return
 }
 
@@ -2673,7 +2758,7 @@ function downloadExts() {
   else
     MSG=""
     MSG+="Latest: ${TAG}\n\n"
-    MSG+="$(curl -skL --connect-timeout 10 "${PROXY}${3}/releases/tag/${TAG}" | pup 'div[data-test-selector="body-content"]' | html2text -utf8)\n\n"
+    MSG+="$(curl -skL --connect-timeout 10 "${PROXY}${3}/releases/tag/${TAG}" | pup 'div[data-test-selector="body-content"]' | html2text --ignore-links --ignore-images)\n\n"
     MSG+="$(TEXT "Do you want to update?")"
     if [ "${5}" = "-1" ]; then
       echo "${T} - ${MSG}"
@@ -2686,34 +2771,35 @@ function downloadExts() {
         --infobox "$(echo -e "${MSG}")" 0 0
     fi
   fi
+  function __download() {
+    rm -f ${TMP_PATH}/${4}*.zip
+    touch "${TMP_PATH}/${4}-${TAG}.zip.downloading"
+    STATUS=$(curl -kL --connect-timeout 10 -w "%{http_code}" "${PROXY}${3}/releases/download/${TAG}/${4}-${TAG}.zip" -o "${TMP_PATH}/${4}-${TAG}.zip")
+    RET=$?
+    rm -f "${TMP_PATH}/${4}-${TAG}.zip.downloading"
+    if [ ${RET} -ne 0 -o ${STATUS:-0} -ne 200 ]; then
+      rm -f "${TMP_PATH}/${4}-${TAG}.zip"
+      MSG="$(printf "$(TEXT "Error downloading new version.\nError: %d:%d\n(Please via https://curl.se/libcurl/c/libcurl-errors.html check error description.)")" "${RET}" "${STATUS}")"
+      echo -e "${MSG}" >"${LOG_FILE}"
+    fi
+    return 0
+  }
+  rm -f "${LOG_FILE}"
   if [ "${5}" = "-1" ]; then
-    (
-      rm -f ${TMP_PATH}/${4}*.zip
-      touch "${TMP_PATH}/${4}-${TAG}.zip.downloading"
-      STATUS=$(curl -kL --connect-timeout 10 -w "%{http_code}" "${PROXY}${3}/releases/download/${TAG}/${4}-${TAG}.zip" -o "${TMP_PATH}/${4}-${TAG}.zip")
-      RET=$?
-      rm -f "${TMP_PATH}/${4}-${TAG}.zip.downloading"
-    ) 2>&1
+    __download $@ 2>&1
   else
-    (
-      rm -f ${TMP_PATH}/${4}*.zip
-      touch "${TMP_PATH}/${4}-${TAG}.zip.downloading"
-      STATUS=$(curl -kL --connect-timeout 10 -w "%{http_code}" "${PROXY}${3}/releases/download/${TAG}/${4}-${TAG}.zip" -o "${TMP_PATH}/${4}-${TAG}.zip")
-      RET=$?
-      rm -f "${TMP_PATH}/${4}-${TAG}.zip.downloading"
-    ) 2>&1 | DIALOG --title "${T}" \
+    __download $@ 2>&1 | DIALOG --title "${T}" \
       --progressbox "$(TEXT "Downloading ...")" 20 100
   fi
-  if [ ${RET} -ne 0 -o ${STATUS:-0} -ne 200 ]; then
-    MSG="$(printf "$(TEXT "Error downloading new version.\nError: %d:%d\n(Please via https://curl.se/libcurl/c/libcurl-errors.html check error description.)")" "${RET}" "${STATUS}")"
+  if [ -f "${LOG_FILE}" ]; then
     if [ "${5}" = "-1" ]; then
-      echo "${T} - ${MSG}"
+      echo "${T} - $(cat "${LOG_FILE}")"
     elif [ "${5}" = "0" ]; then
       DIALOG --title "${T}" \
-        --msgbox "${MSG}" 0 0
+        --msgbox "$(cat "${LOG_FILE}")" 0 0
     else
       DIALOG --title "${T}" \
-        --infobox "${MSG}" 0 0
+        --infobox "$(cat "${LOG_FILE}")" 0 0
     fi
     return 1
   fi

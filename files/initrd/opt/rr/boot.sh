@@ -75,15 +75,17 @@ if [ ! -f "${WORK_PATH}/model-configs/${MODEL}.yml" ] || [ -z "$(readModelKey ${
   exit 1
 fi
 
-HASATA=0
-for D in $(lsblk -dpno NAME); do
-  [ "${D}" = "${LOADER_DISK}" ] && continue
-  if [ "$(getBus "${D}")" = "sata" -o "$(getBus "${D}")" = "scsi" ]; then
-    HASATA=1
-    break
-  fi
-done
-[ ${HASATA} = "0" ] && echo -e "\033[1;33m*** $(TEXT "Please insert at least one sata/scsi disk for system installation, except for the bootloader disk.") ***\033[0m"
+if ! readConfigMap "addons" "${USER_CONFIG_FILE}" | grep -q nvmesystem; then
+  HASATA=0
+  for D in $(lsblk -dpno NAME); do
+    [ "${D}" = "${LOADER_DISK}" ] && continue
+    if [ "$(getBus "${D}")" = "sata" -o "$(getBus "${D}")" = "scsi" ]; then
+      HASATA=1
+      break
+    fi
+  done
+  [ ${HASATA} = "0" ] && echo -e "\033[1;33m*** $(TEXT "Please insert at least one sata/scsi disk for system installation, except for the bootloader disk.") ***\033[0m"
+fi
 
 VID="$(readConfigKey "vid" "${USER_CONFIG_FILE}")"
 PID="$(readConfigKey "pid" "${USER_CONFIG_FILE}")"
@@ -123,8 +125,8 @@ else
   CMDLINE['noefi']=""
 fi
 if [ ! "${BUS}" = "usb" ]; then
-  SZ=$(blockdev --getsz ${LOADER_DISK} 2>/dev/null)  # SZ=$(cat /sys/block/${LOADER_DISK/\/dev\//}/size)
-  SS=$(blockdev --getss ${LOADER_DISK} 2>/dev/null)  # SS=$(cat /sys/block/${LOADER_DISK/\/dev\//}/queue/hw_sector_size)
+  SZ=$(blockdev --getsz ${LOADER_DISK} 2>/dev/null) # SZ=$(cat /sys/block/${LOADER_DISK/\/dev\//}/size)
+  SS=$(blockdev --getss ${LOADER_DISK} 2>/dev/null) # SS=$(cat /sys/block/${LOADER_DISK/\/dev\//}/queue/hw_sector_size)
   SIZE=$((${SZ} * ${SS} / 1024 / 1024 + 10))
   # Read SATADoM type
   DOM="$(readModelKey "${MODEL}" "dom")"
@@ -203,6 +205,7 @@ else
   echo "$(TEXT "Waiting IP.")"
   for N in ${ETHX}; do
     COUNT=0
+    /etc/init.d/S41dhcpcd restart >/dev/null 2>&1 || true
     DRIVER=$(ls -ld /sys/class/net/${N}/device/driver 2>/dev/null | awk -F '/' '{print $NF}')
     echo -en "${N}(${DRIVER}): "
     while true; do
@@ -221,7 +224,11 @@ else
       COUNT=$((${COUNT} + 1))
       IP="$(getIP ${N})"
       if [ -n "${IP}" ]; then
-        echo -en "\r${N}(${DRIVER}): $(printf "$(TEXT "Access \033[1;34mhttp://%s:5000\033[0m to connect the DSM via web.")" "${IP}")\n"
+        if [[ "${IP}" =~ ^169\.254\..* ]]; then
+          echo -en "\r${N}(${DRIVER}): $(TEXT "LINK LOCAL (No DHCP server detected.)")\n"
+        else
+          echo -en "\r${N}(${DRIVER}): $(printf "$(TEXT "Access \033[1;34mhttp://%s:5000\033[0m to connect the DSM via web.")" "${IP}")\n"
+        fi
         break
       fi
       echo -n "."
@@ -252,6 +259,7 @@ else
   DSMLOGO="$(readConfigKey "dsmlogo" "${USER_CONFIG_FILE}")"
   if [ "${DSMLOGO}" = "true" -a -c "/dev/fb0" ]; then
     IP="$(getIP)"
+    [[ "${IP}" =~ ^169\.254\..* ]] && IP=""
     [ -n "${IP}" ] && URL="http://${IP}:5000" || URL="http://find.synology.com/"
     python ${WORK_PATH}/include/functions.py makeqr -d "${URL}" -l "6" -o "${TMP_PATH}/qrcode_boot.png"
     [ -f "${TMP_PATH}/qrcode_boot.png" ] && echo | fbv -acufi "${TMP_PATH}/qrcode_boot.png" >/dev/null 2>/dev/null || true
@@ -261,16 +269,16 @@ else
   fi
 
   # Executes DSM kernel via KEXEC
+  KEXECARGS=""
   KVER=$(readModelKey "${MODEL}" "productvers.[${PRODUCTVER}].kver")
   if [ "${KVER:0:1}" = "3" -a ${EFI} -eq 1 ]; then
     echo -e "\033[1;33m$(TEXT "Warning, running kexec with --noefi param, strange things will happen!!")\033[0m"
-    kexec --noefi -l "${MOD_ZIMAGE_FILE}" --initrd "${MOD_RDGZ_FILE}" --command-line="${CMDLINE_LINE}" >"${LOG_FILE}" 2>&1 || dieLog
-  else
-    kexec -l "${MOD_ZIMAGE_FILE}" --initrd "${MOD_RDGZ_FILE}" --command-line="${CMDLINE_LINE}" >"${LOG_FILE}" 2>&1 || dieLog
+    KEXECARGS="--noefi"
   fi
+  kexec ${KEXECARGS} -l "${MOD_ZIMAGE_FILE}" --initrd "${MOD_RDGZ_FILE}" --command-line="${CMDLINE_LINE}" >"${LOG_FILE}" 2>&1 || dieLog
   echo -e "\033[1;37m$(TEXT "Booting ...")\033[0m"
   for T in $(w 2>/dev/null | grep -v "TTY" | awk -F' ' '{print $2}'); do
-    echo -e "\n\033[1;43m$(TEXT "[This interface will not be operational. Please wait a few minutes.\nFind DSM via http://find.synology.com/ or Synology Assistant and connect.]")\033[0m\n" >"/dev/${T}" 2>/dev/null || true
+    [ -w "/dev/${T}" ] && echo -e "\n\033[1;43m$(TEXT "[This interface will not be operational. Please wait a few minutes.\nFind DSM via http://find.synology.com/ or Synology Assistant and connect.]")\033[0m\n" >"/dev/${T}" 2>/dev/null || true
   done
 
   # Clear logs for dbgutils addons
