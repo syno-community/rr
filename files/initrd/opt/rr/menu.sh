@@ -31,6 +31,7 @@ SMALLNUM="$(readConfigKey "smallnum" "${USER_CONFIG_FILE}")"
 LAYOUT="$(readConfigKey "layout" "${USER_CONFIG_FILE}")"
 KEYMAP="$(readConfigKey "keymap" "${USER_CONFIG_FILE}")"
 KERNEL="$(readConfigKey "kernel" "${USER_CONFIG_FILE}")"
+RD_COMPRESSED="$(readConfigKey "rd-compressed" "${USER_CONFIG_FILE}")"
 LKM="$(readConfigKey "lkm" "${USER_CONFIG_FILE}")"
 DSMLOGO="$(readConfigKey "dsmlogo" "${USER_CONFIG_FILE}")"
 DIRECTBOOT="$(readConfigKey "directboot" "${USER_CONFIG_FILE}")"
@@ -346,7 +347,7 @@ function productversMenu() {
   writeConfigKey "synoinfo" "{}" "${USER_CONFIG_FILE}"
   while IFS=': ' read KEY VALUE; do
     writeConfigKey "synoinfo.\"${KEY}\"" "${VALUE}" "${USER_CONFIG_FILE}"
-  done <<<$(readModelMap "${MODEL}" "productvers.[${PRODUCTVER}].synoinfo")
+  done <<<$(readModelMap "${MODEL}" "synoinfo")
   # Check addons
   PLATFORM="$(readModelKey "${MODEL}" "platform")"
   KVER="$(readModelKey "${MODEL}" "productvers.[${PRODUCTVER}].kver")"
@@ -477,7 +478,7 @@ function ParsePat() {
     writeConfigKey "synoinfo" "{}" "${USER_CONFIG_FILE}"
     while IFS=': ' read KEY VALUE; do
       writeConfigKey "synoinfo.\"${KEY}\"" "${VALUE}" "${USER_CONFIG_FILE}"
-    done <<<$(readModelMap "${MODEL}" "productvers.[${PRODUCTVER}].synoinfo")
+    done <<<$(readModelMap "${MODEL}" "synoinfo")
 
     # Check addons
     PLATFORM="$(readModelKey "${MODEL}" "platform")"
@@ -850,7 +851,7 @@ function cmdlineMenu() {
     if [ -n "${MODEL}" ]; then
       echo "s \"$(TEXT "Define SN/MAC")\"" >>"${TMP_PATH}/menu"
     fi
-    echo "m \"$(TEXT "Show model inherent cmdline")\"" >>"${TMP_PATH}/menu"
+    # echo "m \"$(TEXT "Show model inherent cmdline")\"" >>"${TMP_PATH}/menu"
     echo "e \"$(TEXT "Exit")\"" >>"${TMP_PATH}/menu"
     DIALOG --title "$(TEXT "Cmdline")" \
       --menu "$(TEXT "Choose a option")" 0 0 0 --file "${TMP_PATH}/menu" \
@@ -869,6 +870,9 @@ function cmdlineMenu() {
       MSG+="$(TEXT " * \Z4ahci_remap=4>5:5>8:12>16\Zn\n    Remap data port sequence.(Not apply to DT models.)\n")"
       MSG+="$(TEXT " * \Z4i915.enable_guc=2\Zn\n    Enable the GuC firmware on Intel graphics hardware.(value: 1,2 or 3)\n")"
       MSG+="$(TEXT " * \Z4i915.max_vfs=7\Zn\n    Set the maximum number of virtual functions (VFs) that can be created for Intel graphics hardware.\n")"
+      MSG+="$(TEXT " * \Z4i915.modeset=0\Zn\n    Disable the kernel mode setting (KMS) feature of the i915 driver.\n")"
+      MSG+="$(TEXT " * \Z4apparmor.mode=complain\Zn\n    Set the AppArmor security module to complain mode.\n")"
+      MSG+="$(TEXT " * \Z4apparmor=0\Zn\n    Disable the AppArmor security module.\n")"
       MSG+="$(TEXT " * \Z4consoleblank=300\Zn\n    Set the console to auto turnoff display 300 seconds after no activity (measured in seconds).\n")"
       MSG+="$(TEXT "\nEnter the parameter name and value you need to add.\n")"
       LINENUM=$(($(echo -e "${MSG}" | wc -l) + 10))
@@ -970,14 +974,14 @@ function cmdlineMenu() {
         esac
       done
       ;;
-    m)
-      ITEMS=""
-      while IFS=': ' read KEY VALUE; do
-        ITEMS+="${KEY}: ${VALUE}\n"
-      done <<<$(readModelMap "${MODEL}" "productvers.[${PRODUCTVER}].cmdline")
-      DIALOG --title "$(TEXT "Cmdline")" \
-        --msgbox "${ITEMS}" 0 0
-      ;;
+    # m)
+    #   ITEMS=""
+    #   while IFS=': ' read KEY VALUE; do
+    #     ITEMS+="${KEY}: ${VALUE}\n"
+    #   done <<<$(readModelMap "${MODEL}" "cmdline")
+    #   DIALOG --title "$(TEXT "Cmdline")" \
+    #     --msgbox "${ITEMS}" 0 0
+    #   ;;
     e) return ;;
     esac
   done
@@ -1814,15 +1818,14 @@ function tryRecoveryDSM() {
     R_SN=""
     R_MAC1=""
     R_MAC2=""
-    unique="$(_get_conf_kv unique "${TMP_PATH}/mdX/.syno/patch/VERSION")"
+    model="$(_get_conf_kv model "${TMP_PATH}/mdX/.syno/patch/GRUB_VER")"
     majorversion="$(_get_conf_kv majorversion "${TMP_PATH}/mdX/.syno/patch/VERSION")"
     minorversion="$(_get_conf_kv minorversion "${TMP_PATH}/mdX/.syno/patch/VERSION")"
     buildnumber="$(_get_conf_kv buildnumber "${TMP_PATH}/mdX/.syno/patch/VERSION")"
     smallfixnumber="$(_get_conf_kv smallfixnumber "${TMP_PATH}/mdX/.syno/patch/VERSION")"
     while read F; do
       M="$(basename ${F} .yml)"
-      UNIQUE=$(readModelKey "${M}" "unique")
-      [ "${unique}" = "${UNIQUE}" ] && R_MODEL="${M}" && break
+      [ "${model}" = "$(readModelKey "${M}" "id")" ] && R_MODEL="${M}" && break
     done <<<$(find "${WORK_PATH}/model-configs" -maxdepth 1 -name \*.yml 2>/dev/null | sort)
     if [ -n "${R_MODEL}" ]; then
       ITEMS="$(readConfigEntriesArray "productvers" "${WORK_PATH}/model-configs/${R_MODEL}.yml" | sort -r)"
@@ -1867,7 +1870,7 @@ function tryRecoveryDSM() {
       writeConfigKey "synoinfo" "{}" "${USER_CONFIG_FILE}"
       while IFS=': ' read KEY VALUE; do
         writeConfigKey "synoinfo.\"${KEY}\"" "${VALUE}" "${USER_CONFIG_FILE}"
-      done <<<$(readModelMap "${MODEL}" "productvers.[${PRODUCTVER}].synoinfo")
+      done <<<$(readModelMap "${MODEL}" "synoinfo")
 
       # Check addons
       PLATFORM="$(readModelKey "${MODEL}" "platform")"
@@ -2301,6 +2304,7 @@ function advancedMenu() {
   NEXT="l"
   while true; do
     rm -f "${TMP_PATH}/menu"
+    echo "9 \"$(TEXT "DSM rd compression:") \Z4${RD_COMPRESSED}\Zn\"" >>"${TMP_PATH}/menu"
     echo "l \"$(TEXT "Switch LKM version:") \Z4${LKM}\Zn\"" >>"${TMP_PATH}/menu"
     echo "j \"$(TEXT "HDD sort(hotplug):") \Z4${HDDSORT}\Zn\"" >>"${TMP_PATH}/menu"
     if [ -n "${PRODUCTVER}" ]; then
@@ -2350,6 +2354,12 @@ function advancedMenu() {
       2>${TMP_PATH}/resp
     [ $? -ne 0 ] && break
     case $(cat "${TMP_PATH}/resp") in
+    9)
+      [ "${RD_COMPRESSED}" = "true" ] && RD_COMPRESSED='false' || RD_COMPRESSED='true'
+      writeConfigKey "rd-compressed" "${RD_COMPRESSED}" "${USER_CONFIG_FILE}"
+      touch ${PART1_PATH}/.build
+      NEXT="9"
+      ;;
     l)
       LKM=$([ "${LKM}" = "dev" ] && echo 'prod' || ([ "${LKM}" = "test" ] && echo 'dev' || echo 'test'))
       writeConfigKey "lkm" "${LKM}" "${USER_CONFIG_FILE}"
@@ -2611,7 +2621,7 @@ function advancedMenu() {
       cp -Rf "$(dirname ${WORK_PATH})" "${RDXZ_PATH}/"
       (
         cd "${RDXZ_PATH}"
-        find . 2>/dev/null | cpio -o -H newc -R root:root | xz --check=crc32 >"${RR_RAMDISK_FILE}"
+        find . 2>/dev/null | cpio -o -H newc -R root:root | xz -9 --check=crc32 >"${RR_RAMDISK_FILE}"
       ) || true
       rm -rf "${RDXZ_PATH}"
       DIALOG --title "$(TEXT "Advanced")" \

@@ -34,6 +34,7 @@ PRODUCTVER="$(readConfigKey "productver" "${USER_CONFIG_FILE}")"
 BUILDNUM="$(readConfigKey "buildnum" "${USER_CONFIG_FILE}")"
 SMALLNUM="$(readConfigKey "smallnum" "${USER_CONFIG_FILE}")"
 KERNEL="$(readConfigKey "kernel" "${USER_CONFIG_FILE}")"
+RD_COMPRESSED="$(readConfigKey "rd-compressed" "${USER_CONFIG_FILE}")"
 LKM="$(readConfigKey "lkm" "${USER_CONFIG_FILE}")"
 SN="$(readConfigKey "sn" "${USER_CONFIG_FILE}")"
 LAYOUT="$(readConfigKey "layout" "${USER_CONFIG_FILE}")"
@@ -73,7 +74,6 @@ echo -n "."
 PLATFORM="$(readModelKey "${MODEL}" "platform")"
 KVER="$(readModelKey "${MODEL}" "productvers.[${PRODUCTVER}].kver")"
 KPRE="$(readModelKey "${MODEL}" "productvers.[${PRODUCTVER}].kpre")"
-RD_COMPRESSED="$(readModelKey "${MODEL}" "productvers.[${PRODUCTVER}].rd-compressed")"
 
 # Sanity check
 if [ -z "${PLATFORM}" -o -z "${KVER}" ]; then
@@ -99,7 +99,13 @@ while IFS=': ' read KEY VALUE; do
 done <<<$(readConfigMap "modules" "${USER_CONFIG_FILE}")
 
 # Patches (diff -Naru OLDFILE NEWFILE > xxx.patch)
-while read PE; do
+PATCHS=()
+PATCHS+=("ramdisk-etc-rc-*.patch")
+PATCHS+=("ramdisk-init-script-v${KVER:0:1}-*.patch")
+PATCHS+=("ramdisk-post-init-script-*.patch")
+PATCHS+=("ramdisk-disable-root-pwd-*.patch")
+PATCHS+=("ramdisk-disable-disabled-ports-*.patch")
+for PE in ${PATCHS[@]}; do
   RET=1
   echo "Patching with ${PE}" >"${LOG_FILE}"
   for PF in $(ls ${WORK_PATH}/patch/${PE} 2>/dev/null); do
@@ -113,7 +119,7 @@ while read PE; do
     [ ${RET} -eq 0 ] && break
   done
   [ ${RET} -ne 0 ] && exit 1
-done <<<$(readModelArray "${MODEL}" "productvers.[${PRODUCTVER}].patch")
+done
 
 # Patch /etc/synoinfo.conf
 echo -n "."

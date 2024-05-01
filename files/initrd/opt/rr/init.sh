@@ -28,6 +28,7 @@ if [ ! -f "${USER_CONFIG_FILE}" ]; then
 fi
 
 initConfigKey "kernel" "official" "${USER_CONFIG_FILE}"
+initConfigKey "rd-compressed" "false" "${USER_CONFIG_FILE}"
 initConfigKey "lkm" "prod" "${USER_CONFIG_FILE}"
 initConfigKey "dsmlogo" "true" "${USER_CONFIG_FILE}"
 initConfigKey "directboot" "false" "${USER_CONFIG_FILE}"
